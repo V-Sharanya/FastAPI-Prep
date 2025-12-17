@@ -40,3 +40,8 @@ Step 3- Virtual Environment Steup
     pip freeze > requirements.txt
 
 Step 4 - Write code and logic
+
+Step 5 - to run backend
+- cd backend
+- uvicorn main:app --reload
+

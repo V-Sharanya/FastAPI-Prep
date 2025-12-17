@@ -1,0 +1,360 @@
+
+# FASTAPI + SQLALCHEMY NOTES APP
+---
+
+## 1. What a FastAPI backend actually does
+
+A FastAPI backend mainly handles:
+
+* Accepting HTTP requests (GET, POST, DELETE, etc.)
+* Validating incoming data
+* Talking to the database
+* Returning structured responses
+
+FastAPI itself **does not store data**.
+It only coordinates between:
+
+* **Pydantic (validation)**
+* **SQLAlchemy (database ORM)**
+* **SQLite (actual storage)**
+
+---
+
+## 2. `database.py` – Database setup (foundation layer)
+
+### Purpose
+
+`database.py` prepares the **database infrastructure**.
+It does **not** create routes or business logic.
+
+---
+
+### Required imports
+
+```python
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+```
+
+These are the **three core components** of SQLAlchemy.
+
+---
+
+### Database URL
+
+```python
+DATABASE_URL = "sqlite:///./notes.db"
+```
+
+* `sqlite` → database type
+* `notes.db` → database file
+* If the file does not exist, SQLite creates it automatically
+
+---
+
+### Engine
+
+```python
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+```
+
+#### What is an Engine?
+
+* The **bridge** between Python and the database
+* All SQL operations pass through the engine
+* Python never talks to SQLite directly; it always goes through the engine.
+
+#### Why `check_same_thread=False`?
+
+* SQLite by default allows **only one thread**
+* FastAPI handles requests using **multiple threads**
+* Setting this to `False` allows SQLite to work with FastAPI safely
+
+---
+
+### SessionLocal
+
+```python
+SessionLocal = sessionmaker(bind=engine)
+```
+
+* `SessionLocal` is a **factory**
+* It creates a **new database session per request**
+* A session is required to:
+
+  * Read data
+  * Write data
+  * Commit transactions
+
+---
+
+### Declarative Base
+
+```python
+Base = declarative_base()
+```
+
+* Parent class for **all database models**
+* SQLAlchemy uses this to:
+
+  * Track tables
+  * Create tables
+  * Map Python classes to DB tables
+
+---
+
+### Summary of `database.py`
+
+| Component    | Role                     |
+| ------------ | ------------------------ |
+| Engine       | Python ↔ Database bridge |
+| SessionLocal | Creates DB sessions      |
+| Base         | Parent for all models    |
+
+---
+
+## 3. `models.py` – Database table definitions
+
+### Purpose
+
+Defines **how data is stored** inside the database.
+
+---
+
+### Example
+
+```python
+class Note(Base):
+    __tablename__ = "notes"
+```
+
+* Creates a table named `notes`
+
+```python
+id = Column(Integer, primary_key=True)
+title = Column(String, nullable=False)
+content = Column(Text, nullable=False)
+created_at = Column(DateTime, default=datetime.utcnow)
+```
+
+* Each `Column` maps to a database column
+* Defines data types and constraints
+
+---
+
+### Important clarification
+
+* `models.py` defines **structure**
+* It does **not validate input**
+* It does **not return JSON**
+
+---
+
+## 4. `schemas.py` – Data validation & response shaping
+
+### Purpose
+
+Controls:
+
+* What data is accepted from the client
+* What data is returned in responses
+
+Uses **Pydantic**.
+
+---
+
+### Request schema
+
+```python
+class NoteCreate(BaseModel):
+    title: str
+    content: str
+```
+
+* Used when client sends data (`POST`)
+* FastAPI automatically validates types
+
+---
+
+### Response schema
+
+```python
+class NoteResponse(NoteCreate):
+    id: int
+    created_at: datetime
+```
+
+* Used when API sends data back
+* Extends request schema
+
+---
+
+### `from_attributes = True`
+
+```python
+class Config:
+    from_attributes = True
+```
+
+#### What it actually does:
+
+* Converts **SQLAlchemy ORM objects → Pydantic objects**
+
+Then FastAPI:
+
+* Converts **Pydantic → JSON**
+
+#### Data flow:
+
+```
+ORM object → Pydantic schema → JSON response
+```
+
+---
+
+### Critical rule
+
+> Schemas **never store data**.
+> They only validate and format data.
+
+---
+
+## 5. `crud.py` – Database logic (business layer)
+
+### Purpose
+
+Contains **all database operations**.
+
+CRUD = Create, Read, Update, Delete
+
+---
+
+### Example: Create
+
+```python
+db_note = Note(title=note.title, content=note.content)
+db.add(db_note)
+db.commit()
+db.refresh(db_note)
+```
+
+* `add()` → stage data
+* `commit()` → save permanently
+* `refresh()` → fetch generated fields (ID, timestamp)
+
+---
+
+### Other operations
+
+* `get_notes()` → fetch all
+* `get_note()` → fetch one by ID
+* `delete_note()` → remove record
+
+---
+
+### Design rule
+
+> CRUD files talk **only to the database**, not to FastAPI routes.
+
+---
+
+## 6. `main.py` – Application entry point
+
+### Purpose
+
+* Starts FastAPI
+* Creates tables
+* Defines routes
+* Manages dependencies
+
+---
+
+### Create tables
+
+```python
+models.Base.metadata.create_all(bind=engine)
+```
+
+* Reads all models
+* Creates tables in `notes.db`
+
+---
+
+### Dependency injection (DB session)
+
+```python
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+* Creates a session per request
+* Ensures proper cleanup
+
+---
+
+### API routes
+
+| Method | Endpoint    | Action        |
+| ------ | ----------- | ------------- |
+| POST   | /notes      | Create note   |
+| GET    | /notes      | Get all notes |
+| GET    | /notes/{id} | Get one note  |
+| DELETE | /notes/{id} | Delete note   |
+
+FastAPI automatically:
+
+* Validates input
+* Converts output
+* Handles errors
+
+---
+
+## 7. `notes.db` – Actual data storage
+
+* SQLite database file
+* Stores data permanently
+* Survives server restarts
+
+---
+
+## 8. Complete request flow (VERY IMPORTANT)
+
+```
+Client request
+→ FastAPI route
+→ Pydantic schema validation
+→ Dependency creates DB session
+→ CRUD function runs
+→ SQLAlchemy ORM
+→ SQLite database
+→ ORM object returned
+→ Pydantic response schema
+→ JSON response
+```
+
+---
+
+## 9. Key distinctions (must memorize)
+
+| Component  | Responsibility |
+| ---------- | -------------- |
+| FastAPI    | Routing        |
+| Pydantic   | Validation     |
+| SQLAlchemy | ORM            |
+| SQLite     | Storage        |
+| CRUD       | Business logic |
+
+---
+
+## 10. Final mental model (one-line)
+
+> FastAPI coordinates requests, Pydantic validates data, SQLAlchemy talks to the database, and SQLite stores the data permanently.
+
+
